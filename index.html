@@ -446,10 +446,36 @@ function structureAllowed(el){
   return true;
 }
 function applySourceEdits(source,edits){for(const edit of edits.sort((a,b)=>b.start-a.start))source=source.slice(0,edit.start)+edit.value+source.slice(edit.end);return source;}
-function commitStructure(next,message){
+function captureReportView(mapStart) {
+  if (!frameDoc) return null;
+  const view = frameDoc.defaultView;
+  const locate = element => {
+    const start = mapStart?.(Number(element.getAttribute('data-paper-tag')));
+    if (start !== undefined) return { start };
+    return element.id ? { id: element.id } : null;
+  };
+  const scrolled = [];
+  for (const el of frameDoc.querySelectorAll('[data-paper-tag]')) {
+    if (el === frameDoc.scrollingElement || (!el.scrollTop && !el.scrollLeft)) continue;
+    const locator = locate(el);
+    if (locator) scrolled.push({ locator, left: el.scrollLeft, top: el.scrollTop });
+  }
+  const details = [];
+  for (const el of navigationDetails.keys()) {
+    const locator = locate(el);
+    if (locator) details.push({ locator, open: el.open });
+  }
+  const active = navigationEntries.find(entry => entry.key === state.navKey);
+  return {
+    left: view.scrollX, top: view.scrollY, scrolled, details,
+    navigation: active ? locate(active.el) : null,
+  };
+}
+
+function commitStructure(next, message, view = captureReportView()){
   const old=currentSource();if(next===old)return;
   state.lastGroup=null;remember();state.base=next;state.patches.clear();state.selected=null;state.blockId=null;state.tableCellId=null;state.designSelectedId=null;state.sharedIds=[];state.navKey=null;designBase=null;
-  $('block-toolbar').hidden=true;renderFrame();updateStatus();toast(message+'；可按復原還原。');
+  $('block-toolbar').hidden=true;renderFrame({ view });updateStatus();toast(message+'；可按復原還原。');
 }
 function cloneBlock(raw,source){
   const parsed=new DOMParser().parseFromString(raw,'text/html'),root=parsed.body.firstElementChild;if(!root){toast('這種區塊結構無法安全複製。');return null;}
@@ -468,8 +494,24 @@ function pastePlainText(){const value=$('plain-paste-input').value,el=selectedBl
 function duplicateBlock(){const el=selectedBlock();if(!structureAllowed(el))return;const source=currentSource(),span=structureRange(el,source),copy=cloneBlock(source.slice(span.start,span.end),source);if(copy)commitStructure(source.slice(0,span.end)+copy+source.slice(span.end),'已建立區塊副本');}
 function moveBlock(direction){
   const el=selectedBlock(),peer=direction<0?el?.previousElementSibling:el?.nextElementSibling;if(!structureAllowed(el)||!peer||!structureAllowed(peer))return;
-  const source=currentSource(),a=structureRange(direction<0?peer:el,source),b=structureRange(direction<0?el:peer,source);if(!a||!b||a.end>b.start)return;
-  const next=source.slice(0,a.start)+source.slice(b.start,b.end)+source.slice(a.end,b.start)+source.slice(a.start,a.end)+source.slice(b.end);commitStructure(next,'已移動區塊');
+  const source = currentSource(), parsed = scanHTML(source);
+  const a = structureRange(direction < 0 ? peer : el, source, parsed);
+  const b = structureRange(direction < 0 ? el : peer, source, parsed);
+  if (!a || !b || a.end > b.start) return;
+  const bLength = b.end - b.start;
+  const gapStart = a.start + bLength;
+  const newAStart = gapStart + (b.start - a.end);
+  const next = source.slice(0, a.start) + source.slice(b.start, b.end)
+    + source.slice(a.end, b.start) + source.slice(a.start, a.end) + source.slice(b.end);
+  const view = captureReportView(tagId => {
+    const start = parsed.tags[tagId]?.start;
+    if (start === undefined || start < a.start || start >= b.end) return start;
+    if (start < a.end) return newAStart + start - a.start;
+    if (start < b.start) return gapStart + start - a.end;
+    return a.start + start - b.start;
+  });
+  if (view) view.selection = { start: direction < 0 ? a.start : newAStart };
+  commitStructure(next, '已移動區塊', view);
 }
 function selectBlock(el){
   finishNumericInteraction();
@@ -628,11 +670,11 @@ function rewriteAssets(doc){
   for(const el of doc.querySelectorAll('[srcset]'))el.setAttribute('srcset',el.getAttribute('srcset').split(',').map(item=>{const m=/^(\s*)(\S+)(.*)$/.exec(item);if(!m)return item;const path=resolveAsset(m[2],state.htmlPath);return path?m[1]+assetUrl(path)+m[3]:item;}).join(','));
 }
 function prepareDocument(source,editable){const doc=new DOMParser().parseFromString(source,'text/html');for(const el of doc.querySelectorAll('base,meta[http-equiv]')){if(el.localName==='base'||/refresh|content-security-policy/i.test(el.httpEquiv))el.remove();}for(const a of doc.querySelectorAll('a'))a.removeAttribute('target');for(const el of doc.querySelectorAll('[contenteditable]')){const value=el.getAttribute('contenteditable').trim().toLowerCase();if(editable&&['','true','plaintext-only','false'].includes(value))el.setAttribute('data-paper-native-editable',value==='false'?'false':'true');el.setAttribute('contenteditable','false');}rewriteAssets(doc);if(editable){for(const el of doc.querySelectorAll('script,iframe,object,embed'))el.remove();const style=doc.createElement('style');style.textContent='body{caret-color:#267957} [data-paper-inline]{outline:0!important;cursor:text!important;white-space:pre-wrap!important;min-width:1px!important} [data-paper-tag]:hover{cursor:text} [data-paper-block-selected]{outline:1px solid #2b9b72!important;outline-offset:2px}';doc.head.append(style);}return '<!doctype html>\n'+doc.documentElement.outerHTML;}
-function renderFrame(){
+function renderFrame({ view = null } = {}){
   state.blockId=null;state.tableCellId=null;state.textFallbackId=null;$('block-toolbar').hidden=true;$('image-panel').hidden=true;$('structure-list').replaceChildren();
   finishNumericInteraction();
   closeFontMenu({refresh:false});
-  finishInline();frameGeneration++;scan=scanHTML(state.base);tokenNodes=new Map();frameDoc=null;designEntries=[];surfaceEntries=[];groupPulseUntil=0;clearTimeout(groupPulseTimer);renderGroupOverlay();const iframe=$('editor-frame');const edit=state.mode!=='preview';iframe.setAttribute('sandbox',edit?'allow-same-origin':'allow-scripts');iframe.onload=edit?connectEditor:null;iframe.srcdoc=prepareDocument(edit?markedSource():currentSource(),edit);$('preview-banner').hidden=edit;$('canvas-label').textContent=edit?'文件畫布':'互動預覽';applyViewport();
+  finishInline();frameGeneration++;scan=scanHTML(state.base);tokenNodes=new Map();frameDoc=null;designEntries=[];surfaceEntries=[];groupPulseUntil=0;clearTimeout(groupPulseTimer);renderGroupOverlay();const iframe=$('editor-frame');const edit=state.mode!=='preview';iframe.setAttribute('sandbox',edit?'allow-same-origin':'allow-scripts');iframe.onload=edit?()=>connectEditor(view):null;iframe.srcdoc=prepareDocument(edit?markedSource():currentSource(),edit);$('preview-banner').hidden=edit;$('canvas-label').textContent=edit?'文件畫布':'互動預覽';applyViewport();
 }
 // Navigation changes only editor-owned attributes; source patches remain authoritative.
 function navigationKey(el){return el.id?'id:'+el.id:'tag:'+el.getAttribute('data-paper-tag');}
@@ -667,10 +709,30 @@ function navigateSection(key,{scroll=true,notify=true}={}){
 }
 function revealForEditing(el){const matches=navigationEntries.filter(entry=>entry.el===el||entry.el.contains(el));const entry=matches.find(item=>item.kind==='分頁')||matches[0];if(entry&&entry.key!==state.navKey)navigateSection(entry.key,{scroll:false,notify:false});if(el)revealNavigationAncestors(el);syncViewControls();}
 
-function connectEditor(){
+function connectEditor(view){
+  function locate(locator) {
+    if (!locator) return null;
+    if (locator.id) return doc.getElementById(locator.id);
+    const tag = scan.tags.find(item => item.start === locator.start);
+    return tag ? doc.querySelector('[data-paper-tag="' + tag.id + '"]') : null;
+  }
   if(state.mode==='preview')return;const doc=$('editor-frame').contentDocument;if(!doc)return;frameDoc=doc;bindFileDrop(doc);let active=null;const walker=doc.createTreeWalker(doc.documentElement,NodeFilter.SHOW_COMMENT|NodeFilter.SHOW_TEXT);while(walker.nextNode()){const n=walker.currentNode;if(n.nodeType===8){const m=/^paper:(text|end):(\d+)$/.exec(n.data);if(m)active=m[1]==='text'?Number(m[2]):null;}else if(active!==null){if(!tokenNodes.has(active))tokenNodes.set(active,[]);tokenNodes.get(active).push(n);}}
   doc.addEventListener('pointerdown',()=>{finishNumericInteraction();closeFontMenu();},true);
-  discoverNavigation();renderStructureTree();refreshTypography();updateAssetDiagnostics();const designGeneration=frameGeneration;doc.fonts?.ready.then(()=>{if(frameDoc===doc&&designGeneration===frameGeneration)refreshTypography();});
+  if (view) {
+    const active = locate(view.navigation);
+    state.navKey = active ? navigationKey(active) : null;
+  }
+  discoverNavigation();
+  if (view) {
+    for (const { locator, open } of view.details) {
+      const el = locate(locator);
+      if (!el || el.localName !== 'details' || el.open === open) continue;
+      if (!navigationDetails.has(el)) navigationDetails.set(el, el.open);
+      el.open = open;
+    }
+    syncViewControls();
+  }
+  renderStructureTree();refreshTypography();updateAssetDiagnostics();const designGeneration=frameGeneration;doc.fonts?.ready.then(()=>{if(frameDoc===doc&&designGeneration===frameGeneration)refreshTypography();});
   const getToken=node=>{for(const [id,nodes]of tokenNodes)if(nodes.includes(node))return id;return null;};
   function hit(event){let node=null;const point=doc.caretPositionFromPoint?.(event.clientX,event.clientY);if(point)node=point.offsetNode;else node=doc.caretRangeFromPoint?.(event.clientX,event.clientY)?.startContainer;if(node?.nodeType===3){const id=getToken(node);if(id!==null&&event.target.contains(node))return id;}const found=[];for(const [id,nodes]of tokenNodes)if(nodes.some(n=>event.target.contains(n)&&n.textContent.trim()))found.push(id);return found.length===1?found[0]:null;}
   doc.addEventListener('click',event=>{if(event.target.closest('[data-paper-inline]'))return;event.preventDefault();event.stopPropagation();const navEntry=navigationEntries.find(entry=>entry.tab&&(entry.tab===event.target||entry.tab.contains(event.target)));if(navEntry){navigateSection(navEntry.key);return;}const button=event.target.closest('button,input[type="button"],input[type="submit"]');if(button&&/儲存\s*HTML|另存\s*HTML|儲存副本|保存副本|save\s*(?:HTML|a\s*copy)|download\s*HTML/i.test(button.textContent||button.value||'')){saveAs();return;}const summary=event.target.closest('summary');if(summary?.parentElement.localName==='details'){const details=summary.parentElement;if(!navigationDetails.has(details))navigationDetails.set(details,details.open);details.open=!details.open;state.expandAll=false;syncViewControls();scheduleGroupOverlay();return;}const fromOtherView=inspectorView!=='style',wasImage=!!selectedImage();selectBlock(event.target);showInspectorView('style',{scroll:fromOtherView});if((fromOtherView||wasImage)&&!selectedImage())switchDesignKind('typography');if(state.designKind!=='typography'){selectDesignElement(event.target);return;}const id=hit(event);if(id!==null){selectToken(id);if(inspectorView==='style'&&state.designKind==='typography')startInline(id,{x:event.clientX,y:event.clientY});}},true);
@@ -690,7 +752,17 @@ function connectEditor(){
     scheduleGroupOverlay();
   });
   doc.addEventListener('scroll', scheduleGroupOverlay, true);
-  if(state.selected!==null&&scan.texts[state.selected])selectToken(state.selected,false,false);else clearSelection();$('status-text').textContent='準備好了';
+  if(state.selected!==null&&scan.texts[state.selected])selectToken(state.selected,false,false);else clearSelection();
+  if (view) {
+    const moved = locate(view.selection);
+    if (moved) selectBlock(moved);
+    doc.defaultView.scrollTo({ left: view.left, top: view.top, behavior: 'instant' });
+    for (const { locator, left, top } of view.scrolled) {
+      locate(locator)?.scrollTo({ left, top, behavior: 'instant' });
+    }
+    scheduleGroupOverlay();
+  }
+  $('status-text').textContent='準備好了';
 }
 function findElement(id){if(state.inline?.id===id)return state.inline.span.parentElement?.closest('[data-paper-tag]')||null;const nodes=tokenNodes.get(id);const node=nodes?.find(n=>n.textContent.trim())||nodes?.[0];return node?.parentElement?.closest('[data-paper-tag]')||null;}
 function clearSelection(){state.selected=null;$('selection').hidden=true;frameDoc?.querySelectorAll('[data-paper-selected]').forEach(el=>el.removeAttribute('data-paper-selected'));syncDesignPanels();}
@@ -949,7 +1021,7 @@ function startInline(id,point=null){
 function finishInline(){const current=state.inline;if(!current)return;state.inline=null;editToken(current.id,current.span.textContent,{dom:false});const text=frameDoc.createTextNode(current.span.textContent);current.span.replaceWith(text);tokenNodes.set(current.id,[text]);state.lastGroup=null;$('status-text').textContent='準備好了';renderContentSelectionState();scheduleGroupOverlay();}
 
 
-function undo(redo=false){finishNumericInteraction();finishInline();if(pendingSource()){applySource(false);}const from=redo?state.redo:state.undo,to=redo?state.undo:state.redo;if(!from.length)return;to.push(snapshot());const previous=from.pop();state.base=previous.base;state.patches=new Map(previous.patches);state.lastGroup=null;if(state.mode==='source')$('source-input').value=currentSource();renderFrame();updateStatus();toast(redo?'已重做':'已復原');}
+function undo(redo=false){finishNumericInteraction();finishInline();if(pendingSource()){applySource(false);}const from=redo?state.redo:state.undo,to=redo?state.undo:state.redo;if(!from.length)return;to.push(snapshot());const view=captureReportView();const previous=from.pop();state.base=previous.base;state.patches=new Map(previous.patches);state.lastGroup=null;if(state.mode==='source')$('source-input').value=currentSource();renderFrame({view});updateStatus();toast(redo?'已重做':'已復原');}
 function applySource(show=true){finishInline();const source=sourceEditorValue();if(source!==currentSource()){remember();state.base=source;state.patches.clear();state.selected=null;}if(show)switchMode('edit',false);updateStatus();}
 function switchMode(mode,apply=true){finishNumericInteraction();finishInline();if(state.mode==='source'&&mode!=='source'&&apply)applySource(false);state.mode=mode;$('workspace').dataset.mode=mode;for(const tab of document.querySelectorAll('[data-mode]')){tab.classList.toggle('active',tab.dataset.mode===mode);tab.setAttribute('aria-current',tab.dataset.mode===mode?'page':'false');}$('source-panel').hidden=mode!=='source';$('document-nav').hidden=mode!=='edit';if(mode==='source'){$('source-input').value=currentSource();$('source-length').textContent=(currentSource().length/1024).toFixed(1)+' KB';}else renderFrame();$('selection').hidden=mode!=='edit'||state.selected===null;syncDesignPanels();syncImagePanel();renderBlockToolbar();syncViewControls();updateStatus();}
 function applyViewport(){const wrap=$('paper-wrap'),frame=$('editor-frame');wrap.style.maxWidth=state.mobile?'390px':'';frame.style.width=(100/state.zoom)+'%';frame.style.transform='scale('+state.zoom+')';frame.style.height=(100/state.zoom)+'%';$('desktop-btn').classList.toggle('active',!state.mobile);$('mobile-btn').classList.toggle('active',state.mobile);scheduleGroupOverlay();}
@@ -1026,7 +1098,7 @@ $('style-scope').onchange=event=>{finishNumericInteraction();finishInline();stat
 for(const button of document.querySelectorAll('[data-design-tool]'))button.onclick=()=>switchDesignKind(button.dataset.designTool);
 $('design-kind').onkeydown=event=>{if(event.altKey||event.ctrlKey||event.metaKey)return;const tools=[...$('design-kind').querySelectorAll('[data-design-tool]:not(:disabled)')],index=tools.indexOf(event.target);if(index<0)return;const steps={ArrowRight:1,ArrowLeft:-1,ArrowDown:3,ArrowUp:-3};let next;if(event.key in steps)next=(index+steps[event.key]+tools.length)%tools.length;else if(event.key==='Home')next=0;else if(event.key==='End')next=tools.length-1;if(next!==undefined){event.preventDefault();tools[next].click();tools[next].focus();}};
 $('spacing-kind').onchange=event=>{state.spacingKind=event.target.value;state.sharedIds=[];refreshTypography();pulseGroup();};$('include-plain-styles').onchange=()=>{state.sharedIds=[];refreshTypography();};$('show-group').onclick=pulseGroup;$('next-group-match').onclick=nextGroupMatch;$('select-parent-element').onclick=()=>{const selected=sharedTargets()[0];const parent=selected?.el.parentElement?.closest('[data-paper-tag]');if(parent)selectDesignElement(parent);};$('canvas-scroll').addEventListener('scroll',scheduleGroupOverlay,{passive:true});window.addEventListener('resize',scheduleGroupOverlay);document.addEventListener('scroll',scheduleGroupOverlay,true);
-for(const tab of document.querySelectorAll('[data-mode]'))tab.onclick=()=>switchMode(tab.dataset.mode);$('back-edit').onclick=()=>switchMode('edit');$('apply-source').onclick=()=>applySource();$('source-input').oninput=updateStatus;$('refresh-btn').onclick=renderFrame;$('desktop-btn').onclick=()=>{state.mobile=false;applyViewport();};$('mobile-btn').onclick=()=>{state.mobile=true;applyViewport();};$('zoom-select').onchange=e=>{state.zoom=+e.target.value;applyViewport();};$('toggle-inspector').onclick=()=>$('workspace').classList.toggle('show-inspector');
+for(const tab of document.querySelectorAll('[data-mode]'))tab.onclick=()=>switchMode(tab.dataset.mode);$('back-edit').onclick=()=>switchMode('edit');$('apply-source').onclick=()=>applySource();$('source-input').oninput=updateStatus;$('refresh-btn').onclick=()=>renderFrame();$('desktop-btn').onclick=()=>{state.mobile=false;applyViewport();};$('mobile-btn').onclick=()=>{state.mobile=true;applyViewport();};$('zoom-select').onchange=e=>{state.zoom=+e.target.value;applyViewport();};$('toggle-inspector').onclick=()=>$('workspace').classList.toggle('show-inspector');
 $('search-btn').onclick=showSearch;$('find-input').oninput=()=>{searchCursor=-1;updateSearch();};$('case-sensitive').onchange=()=>{searchCursor=-1;updateSearch();};$('find-next').onclick=findNext;$('replace-one').onclick=replaceOne;$('replace-all').onclick=replaceAll;$('find-input').onkeydown=e=>{if(e.key==='Enter'){e.preventDefault();findNext();}};
 $('help-btn').onclick=()=>$('help-dialog').showModal();for(const btn of document.querySelectorAll('[data-close]'))btn.onclick=()=>$(btn.dataset.close).close();for(const dialog of document.querySelectorAll('dialog'))dialog.onclick=e=>{if(e.target===dialog){const r=dialog.getBoundingClientRect();if(e.clientX<r.left||e.clientX>r.right||e.clientY<r.top||e.clientY>r.bottom)dialog.close();}};
 $('assets-btn').onclick=()=>{$('folder-input').value='';$('folder-input').click();};$('folder-input').onchange=()=>loadAssets($('folder-input').files).catch(e=>toast('素材載入失敗：'+e.message));$('demo-btn').onclick=()=>{if(confirmDiscard())loadSource(DEMO_SOURCE,'營運報告・示範.html',null,true);};
