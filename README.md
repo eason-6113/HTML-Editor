@@ -6,7 +6,7 @@
 
 ## 開始使用
 
-1. 用 Chrome 或 Edge 開啟編輯器，選擇本機 HTML 報表。
+1. 用 Chrome 或 Edge 開啟編輯器，把本機 HTML 報表拖進上方匯入區或畫布。一次拖入多份會進入批次，圖片會加入素材庫。也可點「拖入 HTML」選檔。
 2. 在畫布點選文字或圖片，直接修改內容，也可以在側欄選擇單一元素或共用樣式群組調整外觀。
 3. 按「另存 HTML」取得修改後的副本。多份報表可用「批次」選擇要同步的修改，核對逐檔差異後匯出 ZIP。
 
@@ -22,3 +22,5 @@
 ## 回報與貢獻
 
 歡迎[回報問題](https://github.com/eason-6113/HTML-Editor/issues/new/choose)、[討論功能](https://github.com/eason-6113/HTML-Editor/discussions)，或 fork 後提交 PR。請先閱讀 [貢獻指南](CONTRIBUTING.md)。
+
+本專案採用 [MIT 授權](LICENSE)。
